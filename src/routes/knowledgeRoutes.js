@@ -55,6 +55,7 @@ function chunkText(text, chunkSize = 1000) {
 router.post('/ingest', upload.single('document'), handle(async (req) => {
   let text = '';
   const sourceName = req.file ? req.file.originalname : (req.body.title || 'Unknown Source');
+  const category = req.body.category || 'General';
 
   // Handle file upload or raw text
   if (req.file) {
@@ -74,7 +75,7 @@ router.post('/ingest', upload.single('document'), handle(async (req) => {
   const chunks = chunkText(text, 1000); // 1000 chars roughly
   if (chunks.length === 0) throw new Error('No text found to ingest.');
 
-  console.log(`Ingesting document: ${sourceName} into ${chunks.length} chunks.`);
+  console.log(`Ingesting document: ${sourceName} into ${chunks.length} chunks under category: ${category}.`);
 
   // 2. Embed each chunk & 3. Upsert to Pinecone
   const vectors = [];
@@ -91,7 +92,8 @@ router.post('/ingest', upload.single('document'), handle(async (req) => {
       metadata: {
         text: chunkText,
         source: sourceName,
-        chunkIndex: i
+        chunkIndex: i,
+        category: category
       }
     });
   }
@@ -101,7 +103,8 @@ router.post('/ingest', upload.single('document'), handle(async (req) => {
   return {
     message: 'Knowledge successfully ingested into Pinecone.',
     chunksIngested: chunks.length,
-    source: sourceName
+    source: sourceName,
+    category
   };
 }));
 
