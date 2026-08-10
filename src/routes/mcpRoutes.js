@@ -51,6 +51,12 @@ router.post('/resume/create', handle(async (req) => {
   return OpenAIService.parseResume(resumeText);
 }));
 
+// Called by: aiController (AI Generative Resume Summary & Insights)
+router.post('/resume/summary', handle(async (req) => {
+  const { details } = req.body;
+  return OpenAIService.generateResumeSummary(details || {});
+}));
+
 // ─────────────────────────────────────────
 // INTERVIEW OPERATIONS
 // ─────────────────────────────────────────
@@ -81,10 +87,12 @@ router.post('/interview/pass-fail', handle(async (req) => {
 // ─────────────────────────────────────────
 
 // Called by: employeeController (policy Q&A, document analysis)
-router.post('/document/analyze', handle(async (req) => {
-  const { documentText, context } = req.body;
-  if (!documentText) throw new Error('documentText is required');
-  return OpenAIService.analyzeDocument(documentText, context || 'General HR Document');
+const multer = require('multer');
+const upload = multer({ limits: { fileSize: 15 * 1024 * 1024 } });
+
+router.post('/document/analyze', upload.single('file'), handle(async (req) => {
+  if (!req.file) throw new Error('file is required');
+  return OpenAIService.analyzeUploadedDocument(req.file.buffer, req.file.mimetype, req.file.originalname);
 }));
 
 // Called by: compensationController, managerController, superAdminController
@@ -147,6 +155,13 @@ router.post('/chat', handle(async (req) => {
     throw new Error('messages array is required');
   }
   return OpenAIService.chat(messages, tenantId || 'global', accessLevel || 'EMPLOYEE', systemPrompt || null);
+}));
+
+// Called by: aiController (AI Policy Assistant RAG query)
+router.post('/policy/query', handle(async (req) => {
+  const { query, history, tenantId, accessLevel, pageContext } = req.body;
+  if (!query) throw new Error('query is required');
+  return OpenAIService.policyAssistant(query, history || [], tenantId || 'global', accessLevel || 'EMPLOYEE', pageContext || '/employee/help');
 }));
 
 module.exports = router;
