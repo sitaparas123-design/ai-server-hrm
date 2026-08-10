@@ -23,17 +23,22 @@ class PineconeService {
   }
 
   /**
-   * Queries Pinecone for similar vectors.
+   * Queries Pinecone for similar vectors with optional metadata filters.
    * @param {Array} queryEmbedding - The embedding vector of the search query.
    * @param {number} topK - Number of results to return.
+   * @param {Object} filter - Metadata filters to apply (e.g. { tenantId: '...' }).
    */
-  static async queryVector(queryEmbedding, topK = 3) {
+  static async queryVector(queryEmbedding, topK = 3, filter = null) {
     const index = this.getIndex();
-    const queryResponse = await index.query({
+    const queryParams = {
       vector: queryEmbedding,
       topK,
       includeMetadata: true,
-    });
+    };
+    if (filter) {
+      queryParams.filter = filter;
+    }
+    const queryResponse = await index.query(queryParams);
     return queryResponse.matches || [];
   }
 }

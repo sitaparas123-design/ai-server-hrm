@@ -12,7 +12,8 @@ const handle = (fn) => async (req, res) => {
     res.json({ success: true, data: result });
   } catch (err) {
     console.error(`[MCP Route Error] ${req.path}:`, err.message);
-    res.status(500).json({ success: false, error: err.message });
+    const status = err.message.toLowerCase().includes('required') ? 400 : 500;
+    res.status(status).json({ success: false, error: err.message });
   }
 };
 
@@ -116,6 +117,12 @@ router.post('/onboarding/generate', handle(async (req) => {
   return OpenAIService.generateOnboarding(role, department || 'General');
 }));
 
+router.post('/letter/generate', handle(async (req) => {
+  const { letterType, contextData } = req.body;
+  if (!letterType) throw new Error('letterType is required');
+  return OpenAIService.generateLetter(letterType, contextData || {});
+}));
+
 // ─────────────────────────────────────────
 // SUPER ADMIN ANALYTICS
 // ─────────────────────────────────────────
@@ -127,17 +134,19 @@ router.post('/analytics/execute', handle(async (req) => {
   return OpenAIService.executeAnalytics(query, schemaContext);
 }));
 
-// ─────────────────────────────────────────
-// AI CHAT
-// ─────────────────────────────────────────
+// Called by: employeeController.aiPayrollInsights
+router.post('/payroll/insights', handle(async (req) => {
+  const { employeeId, payslipData } = req.body;
+  return OpenAIService.generatePayrollInsights(employeeId, payslipData || {});
+}));
 
-// Called by: employeeController (HR Helpdesk Chatbot)
+// Called by: copilotController (HR Helpdesk Chatbot / Copilot)
 router.post('/chat', handle(async (req) => {
-  const { messages } = req.body;
+  const { messages, tenantId, accessLevel, systemPrompt } = req.body;
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
     throw new Error('messages array is required');
   }
-  return OpenAIService.chat(messages);
+  return OpenAIService.chat(messages, tenantId || 'global', accessLevel || 'EMPLOYEE', systemPrompt || null);
 }));
 
 module.exports = router;

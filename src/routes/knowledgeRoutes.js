@@ -18,7 +18,8 @@ const handle = (fn) => async (req, res) => {
     res.json({ success: true, data: result });
   } catch (err) {
     console.error(`[MCP Route Error] ${req.path}:`, err.message);
-    res.status(500).json({ success: false, error: err.message });
+    const status = err.message.toLowerCase().includes('required') ? 400 : 500;
+    res.status(status).json({ success: false, error: err.message });
   }
 };
 
@@ -56,7 +57,9 @@ router.post('/ingest', upload.single('document'), handle(async (req) => {
   let text = '';
   const sourceName = req.file ? req.file.originalname : (req.body.title || 'Unknown Source');
   const category = req.body.category || 'General';
-
+  const tenantId = req.body.tenantId || 'global';
+  const accessLevel = req.body.accessLevel || 'EMPLOYEE';
+ 
   // Handle file upload or raw text
   if (req.file) {
     if (req.file.mimetype === 'application/pdf') {
@@ -70,13 +73,13 @@ router.post('/ingest', upload.single('document'), handle(async (req) => {
   } else {
     throw new Error('Please provide a file or raw text to ingest.');
   }
-
+ 
   // 1. Chunk the text
   const chunks = chunkText(text, 1000); // 1000 chars roughly
   if (chunks.length === 0) throw new Error('No text found to ingest.');
-
-  console.log(`Ingesting document: ${sourceName} into ${chunks.length} chunks under category: ${category}.`);
-
+ 
+  console.log(`Ingesting document: ${sourceName} into ${chunks.length} chunks under category: ${category} (Tenant: ${tenantId}, Access: ${accessLevel}).`);
+ 
   // 2. Embed each chunk & 3. Upsert to Pinecone
   const vectors = [];
   for (let i = 0; i < chunks.length; i++) {
@@ -84,8 +87,8 @@ router.post('/ingest', upload.single('document'), handle(async (req) => {
     const embedding = await OpenAIService.generateEmbedding(chunkText);
     
     // Create a unique ID for the vector
-    const id = crypto.createHash('sha256').update(`${sourceName}-${i}`).digest('hex');
-
+    const id = crypto.createHash('sha256').update(`${sourceName}-${tenantId}-${i}`).digest('hex');
+ 
     vectors.push({
       id,
       values: embedding,
@@ -93,18 +96,22 @@ router.post('/ingest', upload.single('document'), handle(async (req) => {
         text: chunkText,
         source: sourceName,
         chunkIndex: i,
-        category: category
+        category: category,
+        tenantId: tenantId,
+        accessLevel: accessLevel
       }
     });
   }
-
+ 
   await PineconeService.upsertVectors(vectors);
-
+ 
   return {
     message: 'Knowledge successfully ingested into Pinecone.',
     chunksIngested: chunks.length,
     source: sourceName,
-    category
+    category,
+    tenantId,
+    accessLevel
   };
 }));
 

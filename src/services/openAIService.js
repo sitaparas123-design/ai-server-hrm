@@ -227,6 +227,50 @@ ${JSON.stringify(data)}
     return generate(prompt, true);
   }
 
+  static async generatePayrollInsights(employeeId, payslipData) {
+    const prompt = `
+You are an HCM payroll assistant.
+Analyze only the payroll and compensation data provided to you.
+Do not invent salary, deductions, taxes, bonuses, benefits, or payroll values.
+If information is missing, explicitly state that it is unavailable.
+Explain payroll information in clear employee-friendly language.
+Never provide legal, tax, or financial advice as a definitive conclusion.
+
+Return ONLY a valid JSON object with the following structure:
+{
+  "summary": "Detailed overall summary explaining the employee's payroll and compensation in friendly, professional language.",
+  "earnings": [
+    {
+      "label": "Name of earning component (e.g. Basic Salary, Allowances, Bonus)",
+      "amount": 1000.00
+    }
+  ],
+  "deductions": [
+    {
+      "label": "Name of deduction (e.g. Tax, Provident Fund)",
+      "amount": 100.00,
+      "explanation": "Brief description of why this was deducted."
+    }
+  ],
+  "netPay": 900.00,
+  "insights": [
+    "Key payroll insight 1",
+    "Key payroll insight 2"
+  ],
+  "recommendations": [
+    "Payroll recommendation 1",
+    "Payroll recommendation 2"
+  ]
+}
+
+Data for Analysis:
+Employee ID: ${employeeId}
+Payroll Data:
+${JSON.stringify(payslipData)}
+    `.trim();
+    return generate(prompt, true);
+  }
+
   // ─────────────────────────────────────────
   // PERFORMANCE & ONBOARDING
   // ─────────────────────────────────────────
@@ -281,6 +325,57 @@ Return ONLY a valid JSON object:
     return generate(prompt, true);
   }
 
+  static async generateLetter(letterType, contextData) {
+    const prompt = `
+You are an expert HR specialist and document generator.
+Generate a professional, well-formatted, and complete HR letter of type: "${letterType}" based on the context data.
+
+Use the following context details to customize the letter exactly. Do NOT use fake names, salaries, dates, or company details.
+Context:
+${JSON.stringify(contextData)}
+
+You MUST return ONLY a valid JSON object matching the following structure:
+{
+  "documentType": "Offer Letter" | "Warning Letter" | "Promotion Letter" | etc.,
+  "date": "Date of letter (use context date if provided)",
+  "company": {
+    "name": "Company Name",
+    "address": "Company Street Address, City, State, ZIP"
+  },
+  "candidate": {
+    "name": "Candidate Full Name",
+    "email": "Candidate Email",
+    "address": "Candidate Address (or empty if not provided)"
+  },
+  "subject": "Clear business subject line",
+  "salutation": "Dear [Candidate Name],",
+  "bodyParagraphs": [
+    "Paragraph 1 welcoming the candidate...",
+    "Paragraph 2 details...",
+    "Paragraph 3 outlining contingency checks..."
+  ],
+  "positionDetails": {
+    "jobTitle": "Job Title",
+    "department": "Department Name (if provided)",
+    "salary": "Salary amount",
+    "joiningDate": "Expected commencement date",
+    "employmentType": "Employment type (e.g. Full-Time)",
+    "workLocation": "Location of work"
+  },
+  "terms": [
+    "Please return a signed copy by [responseDeadline] to accept.",
+    "This offer is subject to pre-employment background screening."
+  ],
+  "closing": "Standard business closing (e.g. We look forward to welcoming you to the team.)",
+  "signatory": {
+    "name": "Signatory Name (HR Person)",
+    "designation": "Signatory Title (e.g. HR Manager)"
+  }
+}
+    `.trim();
+    return generate(prompt, true);
+  }
+
   // ─────────────────────────────────────────
   // SUPER ADMIN ANALYTICS
   // ─────────────────────────────────────────
@@ -309,7 +404,7 @@ ${JSON.stringify(schemaContext || {})}
   // AI CHAT
   // ─────────────────────────────────────────
 
-  static async chat(messages) {
+  static async chat(messages, tenantId = 'global', accessLevel = 'EMPLOYEE', systemPrompt = null) {
     const history = messages.map(m => ({
       role: m.role === 'user' ? 'user' : 'assistant',
       content: m.content,
@@ -320,8 +415,19 @@ ${JSON.stringify(schemaContext || {})}
 
     if (lastUserMessage) {
       try {
+        const allowedLevels = ['EMPLOYEE'];
+        const normalizedRole = (accessLevel || 'EMPLOYEE').toUpperCase();
+        if (normalizedRole === 'MANAGER') allowedLevels.push('MANAGER');
+        if (normalizedRole === 'HR') allowedLevels.push('MANAGER', 'HR');
+        if (normalizedRole === 'ADMIN' || normalizedRole === 'SUPERADMIN') allowedLevels.push('MANAGER', 'HR', 'ADMIN');
+
+        const filter = {
+          tenantId: { $in: [tenantId, 'global'] },
+          accessLevel: { $in: allowedLevels }
+        };
+
         const queryEmbedding = await OpenAIService.generateEmbedding(lastUserMessage.content);
-        const matches = await PineconeService.queryVector(queryEmbedding, 3);
+        const matches = await PineconeService.queryVector(queryEmbedding, 3, filter);
         if (matches && matches.length > 0) {
           retrievedContext = matches.map(m => m.metadata.text).join('\n\n');
         }
@@ -330,11 +436,16 @@ ${JSON.stringify(schemaContext || {})}
       }
     }
 
+    // Security: server-injected system prompt takes precedence
+    const securityBlock = systemPrompt
+      ? `${systemPrompt}\n\n`
+      : '';
+
     const systemInstructions = {
       role: 'system',
-      content: `You are an expert HR Assistant for an Enterprise HCM Platform. 
-Help employees and HR teams with questions about leaves, payroll, policies, attendance, onboarding, and performance.
-Be concise, professional, and helpful. Format responses clearly.
+      content: `${securityBlock}You are an expert HR Assistant and Global HCM Copilot for an Enterprise HCM Platform. 
+Help employees, managers, and HR teams with questions about leaves, payroll, policies, attendance, onboarding, and performance.
+Be concise, professional, and helpful. Format responses clearly in markdown.
 
 Use the following enterprise knowledge context to answer if it's relevant to the user's question:
 ### ENTERPRISE CONTEXT ###
