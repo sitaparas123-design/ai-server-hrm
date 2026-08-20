@@ -176,6 +176,163 @@ ${resumeText}
     return generate(prompt, true);
   }
 
+  static async evaluateResumeMatch({ resumeText, resumeBase64, fileName, mimeType, job }) {
+    let text = resumeText || '';
+    
+    // If base64 is provided and text is empty, extract text
+    if (!text && resumeBase64) {
+      try {
+        let buffer;
+        if (typeof resumeBase64 === 'string' && resumeBase64.startsWith('data:')) {
+          const matches = resumeBase64.match(/^data:([^;]+);base64,(.+)$/);
+          if (matches && matches[2]) {
+            buffer = Buffer.from(matches[2], 'base64');
+            if (!mimeType) mimeType = matches[1];
+          }
+        } else if (typeof resumeBase64 === 'string') {
+          buffer = Buffer.from(resumeBase64, 'base64');
+        }
+        
+        if (buffer) {
+          const lowerName = (fileName || '').toLowerCase();
+          const isPdf = (mimeType && mimeType.includes('pdf')) || lowerName.endsWith('.pdf');
+          if (isPdf) {
+            try {
+              const pdfModule = require('pdf-parse');
+              if (typeof pdfModule === 'function') {
+                const pdfData = await pdfModule(buffer);
+                text = pdfData.text || '';
+              } else if (pdfModule && pdfModule.PDFParse) {
+                const parser = new pdfModule.PDFParse({ data: buffer });
+                const pdfData = await parser.getText();
+                text = pdfData?.text || pdfData || '';
+              }
+            } catch (pErr) {
+              console.warn('[evaluateResumeMatch PDF Error]:', pErr.message);
+            }
+          }
+          if (!text || text.trim().length < 10) {
+            // Text or ascii extraction fallback
+            text = buffer.toString('utf8').replace(/[^\x20-\x7E\n\r]/g, ' ').replace(/\s+/g, ' ').trim();
+          }
+        }
+      } catch (err) {
+        console.error('[evaluateResumeMatch Buffer Error]:', err.message);
+      }
+    }
+
+    const jobTitle = job?.title || 'General Position';
+    const jobReqs = job?.requirements || job?.skills || '';
+    const jobDesc = job?.description || '';
+    const jobExp = job?.experience || '';
+
+    // If text is still practically empty or contains only non-printable / binary junk
+    if (!text || text.trim().length < 20) {
+      return {
+        isValidResume: false,
+        score: null,
+        matchScore: null,
+        extractedSkills: [],
+        strengths: [],
+        gaps: ["No readable text or resume content found in uploaded document."],
+        recommendation: "Invalid Resume",
+        reasoning: "The uploaded file does not contain readable resume text or valid professional information. Please upload a valid CV or resume in PDF or DOCX format."
+      };
+    }
+
+    const prompt = `
+You are an expert AI Talent Acquisition specialist and ATS Document Validator.
+First, validate whether the uploaded document is an authentic candidate CV/Resume or professional profile.
+Then, if valid, evaluate the candidate against the target job requirements.
+
+Target Job Details:
+- Job Title: ${jobTitle}
+- Experience Level: ${jobExp}
+- Requirements / Skills: ${jobReqs}
+- Job Description: ${jobDesc}
+
+Candidate's Uploaded Document Text:
+"""
+${text.slice(0, 8000)}
+"""
+
+CRITICAL INSTRUCTIONS:
+1. STRICT DOCUMENT CLASSIFICATION & VALIDATION:
+   - Determine if the document is a genuine candidate CV, Resume, or professional employment profile (containing work history, education, career summary, or skills).
+   - If the document is a general report, academic paper/thesis, financial statement, invoice, receipt, legal contract, food recipe, meeting minutes, homework, code snippet, lyrics, or random non-resume document:
+     * Set "isValidResume": false
+     * Set "matchScore": null
+     * Set "score": null
+     * Set "recommendation": "Invalid Resume"
+     * Set "reasoning": "The uploaded file is a general document/report instead of a candidate CV or resume. Please upload a valid CV/resume."
+     * Do NOT generate a percentage match score.
+2. MATCH SCORING (ONLY WHEN isValidResume IS true):
+   - Evaluate actual candidate skills, technologies, experience, and projects vs the job requirements.
+   - Assign a realistic score from 0 to 100 based strictly on relevance and qualification match.
+   - If candidate's skills match the job well (e.g. React/Node for a Frontend React role), score 75-98%.
+   - If candidate's background is somewhat related but lacks primary skills, score 40-74%.
+   - If candidate is from an entirely different field (e.g. an accountant applying for a React developer), score 5-35%.
+3. Return ONLY a valid JSON object with this exact schema:
+{
+  "isValidResume": true | false,
+  "matchScore": number or null,
+  "score": number or null,
+  "extractedSkills": ["Skill 1", "Skill 2"],
+  "strengths": ["Key matching strength 1", "Key matching strength 2"],
+  "gaps": ["Missing requirement or skill gap 1"],
+  "recommendation": "Strong Match" | "Moderate Match" | "Low Match" | "Invalid Resume",
+  "reasoning": "Clear explanation of the document validity and assessment."
+}
+`.trim();
+
+    try {
+      const result = await generate(prompt, true);
+      const isValid = result.isValidResume === true;
+      if (!isValid) {
+        return {
+          isValidResume: false,
+          score: null,
+          matchScore: null,
+          extractedSkills: [],
+          strengths: [],
+          gaps: ["Uploaded file is not a valid candidate resume."],
+          recommendation: "Invalid Resume",
+          reasoning: result.reasoning || "The uploaded file is a random document or report instead of a candidate CV/resume. Please upload a valid CV or resume."
+        };
+      }
+
+      const rawScore = typeof result.matchScore === 'number' ? result.matchScore : (typeof result.score === 'number' ? result.score : 50);
+      const score = Math.max(0, Math.min(100, Math.round(rawScore)));
+      return {
+        isValidResume: true,
+        score: score,
+        matchScore: score,
+        extractedSkills: Array.isArray(result.extractedSkills) ? result.extractedSkills : [],
+        strengths: Array.isArray(result.strengths) ? result.strengths : [],
+        gaps: Array.isArray(result.gaps) ? result.gaps : [],
+        recommendation: result.recommendation || (score >= 75 ? 'Strong Match' : score >= 50 ? 'Moderate Match' : 'Low Match'),
+        reasoning: result.reasoning || `Evaluated candidate against ${jobTitle}.`
+      };
+    } catch (err) {
+      console.error('[OpenAIService.evaluateResumeMatch Error]:', err.message);
+      // Heuristic keyword fallback
+      const reqList = (jobReqs + ' ' + jobTitle).toLowerCase().split(/[\s,;|/]+/).filter(w => w.length > 3);
+      const textLower = text.toLowerCase();
+      const matched = reqList.filter(req => textLower.includes(req));
+      const heuristicScore = reqList.length > 0 ? Math.min(95, Math.round((matched.length / reqList.length) * 100)) : 60;
+      return {
+        isValidResume: true,
+        score: heuristicScore,
+        matchScore: heuristicScore,
+        extractedSkills: matched,
+        strengths: matched.length > 0 ? [`Matches: ${matched.slice(0, 3).join(', ')}`] : ['General application'],
+        gaps: reqList.filter(r => !matched.includes(r)).slice(0, 3),
+        recommendation: heuristicScore >= 70 ? 'Strong Match' : 'Review Required',
+        reasoning: `Extracted ${matched.length} matching skill keywords from resume text.`
+      };
+    }
+  }
+
   // ─────────────────────────────────────────
   // INTERVIEW OPERATIONS
   // ─────────────────────────────────────────
@@ -452,6 +609,29 @@ ${JSON.stringify(data)}
     return generate(prompt, true);
   }
 
+  static async generateLeaveRecommendations(leaveHistory) {
+    const prompt = `
+You are an enterprise HR scheduling assistant.
+Analyze these active leave requests and team data.
+Return ONLY a valid JSON object matching this schema:
+{
+  "summary": "Detailed summary of staffing coverage and risks during the active period.",
+  "capacityImpact": "e.g., 90% team capacity maintained.",
+  "recommendations": [
+    {
+      "title": "Employee Name - Leave Type",
+      "decision": "Recommended Approval | Review Required | Rejected",
+      "reason": "Clear explanation citing overlap, balance, or sprint deadlines."
+    }
+  ]
+}
+
+Leave Requests Data:
+${JSON.stringify(leaveHistory)}
+    `.trim();
+    return generate(prompt, true);
+  }
+
   static async generatePayrollInsights(employeeId, payslipData) {
     const prompt = `
 You are an HCM payroll assistant.
@@ -505,29 +685,114 @@ ${JSON.stringify(payslipData)}
   }
 
   static async evaluatePerformance(kpis, feedback) {
-    const prompt = `
-You are a performance management expert.
-Evaluate the following employee KPIs and feedback.
-Return ONLY a valid JSON object:
-{
-  "overallRating": "Exceeds Expectations" | "Meets Expectations" | "Needs Improvement",
-  "score": 82,
-  "kpiAnalysis": [
-    { "kpi": "KPI Name", "status": "Achieved" | "Partial" | "Missed", "comment": "..." }
-  ],
-  "strengths": ["..."],
-  "developmentAreas": ["..."],
-  "managerRecommendation": "Promotion Ready" | "Standard Increment" | "PIP Required",
-  "summary": "2-3 sentence evaluation summary"
-}
+    const isTeamMode = feedback === 'Overall Team Feedback';
 
-KPIs:
+    let prompt = '';
+    if (isTeamMode) {
+      prompt = `
+You are a team performance analyzer.
+Evaluate the following team KPIs:
 ${JSON.stringify(kpis || [])}
 
-Feedback:
-${JSON.stringify(feedback || {})}
-    `.trim();
+Return ONLY a valid JSON object matching this schema:
+{
+  "summary": "Detailed synthesis of overall team performance, qualitative assessments & growth recommendations.",
+  "capacityImpact": "e.g., 94% productivity index.",
+  "recommendations": [
+    {
+      "title": "Recommendation Area Title",
+      "decision": "Recommended Action / Phase",
+      "reason": "Clear explanation citing the KPI metrics."
+    }
+  ]
+}
+      `;
+    } else {
+      prompt = `
+You are an HR appraisal copilot.
+Draft a performance review for the employee based on the following details:
+Context: ${JSON.stringify(feedback || {})}
+KPIs: ${JSON.stringify(kpis || [])}
+
+Return ONLY a valid JSON object matching this schema:
+{
+  "rating": 4,
+  "strengths": "Bullet list of key achievements/strengths.",
+  "improvements": "Bullet list of developmental areas/improvements.",
+  "summary": "2-3 sentences evaluating the performance cycle."
+}
+      `;
+    }
     return generate(prompt, true);
+  }
+
+  static async generateAttendanceInsights(attendanceData) {
+    try {
+      const prompt = `
+You are an advanced HCM AI Attendance, Leave & Burnout Intelligence Engine.
+Analyze the following team attendance logs and leave requests data:
+
+Attendance Logs:
+${JSON.stringify(attendanceData?.attendance || [])}
+
+Leave Requests:
+${JSON.stringify(attendanceData?.leaves || [])}
+
+Return ONLY a valid JSON object with EXACTLY this structure:
+{
+  "attendanceSummary": "Precise 2-3 sentence summary covering total logs, punctuality rates, present vs late count, and work location modes.",
+  "leaveSummary": "Precise 2-3 sentence summary covering active leave requests, approved vs pending leaves, primary leave types, and team capacity impact.",
+  "summary": "Combined executive summary highlighting overall attendance health and operational stability.",
+  "capacityImpact": "XX% capacity maintained",
+  "burnoutRisk": "Low" | "Moderate" | "High",
+  "recommendations": [
+    {
+      "title": "Title of recommendation",
+      "decision": "Recommended Action / Decision (e.g. Approved Coverage, Schedule Review Needed, Safe Load)",
+      "reason": "Detailed data-driven explanation based on actual attendance/overtime/leave patterns."
+    }
+  ]
+}
+      `.trim();
+      return await generate(prompt, true);
+    } catch (err) {
+      console.error("[OpenAIService.generateAttendanceInsights Error]", err.message);
+      
+      const logs = attendanceData?.attendance || [];
+      const leaves = attendanceData?.leaves || [];
+      
+      const totalLogs = logs.length || 1;
+      const lateCount = logs.filter(l => (l.status || '').toLowerCase() === 'late').length;
+      const presentCount = logs.filter(l => (l.status || '').toLowerCase() === 'present').length || Math.max(0, totalLogs - lateCount);
+      const punctualityPct = Math.round((presentCount / totalLogs) * 100);
+
+      const totalLeaves = leaves.length;
+      const pendingLeaves = leaves.filter(l => (l.status || '').toUpperCase() === 'PENDING' || l.status === 'Pending').length;
+      const approvedLeaves = leaves.filter(l => (l.status || '').toUpperCase() === 'APPROVED' || l.status === 'Approved').length;
+      const capacityPct = Math.max(60, Math.min(100, Math.round(100 - (approvedLeaves * 3.5))));
+
+      const burnoutRisk = (lateCount > 3 || pendingLeaves > 3) ? "Moderate" : lateCount > 5 ? "High" : "Low";
+
+      return {
+        attendanceSummary: `Team attendance is tracking at ${punctualityPct}% punctuality rate across ${totalLogs} logged session(s), with ${presentCount} present and ${lateCount} late check-in(s).`,
+        leaveSummary: `A total of ${totalLeaves} leave request(s) recorded (${approvedLeaves} approved, ${pendingLeaves} pending review). Operational workforce capacity remains stable.`,
+        summary: `Team operations are running smoothly with ${punctualityPct}% attendance timeliness and ${capacityPct}% active workforce capacity maintained.`,
+        capacityImpact: `${capacityPct}% capacity maintained`,
+        burnoutRisk: burnoutRisk,
+        recommendations: [
+          {
+            title: "Punctuality & Schedule Alignment",
+            decision: lateCount > 2 ? "Review Shift Timings" : "Optimal Alignment",
+            reason: lateCount > 2 ? `${lateCount} team members had late check-ins. Review shift start times or offer flexible check-in windows.` : "Check-in patterns show consistent team punctuality and schedule adherence."
+          },
+          {
+            title: "Leave Approval & Team Coverage",
+            decision: pendingLeaves > 0 ? "Pending Review Action" : "Coverage Balanced",
+            reason: pendingLeaves > 0 ? `${pendingLeaves} leave request(s) awaiting manager review. Prompt approval ensures seamless team scheduling.` : "All current leave requests are cleared and team coverage is sufficient."
+          }
+        ]
+      };
+    }
   }
 
   static async generateOnboarding(role, department) {

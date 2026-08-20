@@ -28,6 +28,12 @@ router.post('/resume/parse', handle(async (req) => {
   return OpenAIService.parseResume(resumeText);
 }));
 
+// Called by: publicController, candidateController for real AI resume match against job
+router.post('/resume/evaluate', handle(async (req) => {
+  const { resumeText, resumeBase64, fileName, mimeType, job } = req.body;
+  return OpenAIService.evaluateResumeMatch({ resumeText, resumeBase64, fileName, mimeType, job });
+}));
+
 // Called by: candidateController score check
 router.post('/resume/score', handle(async (req) => {
   const { resumeText, criteria } = req.body;
@@ -102,6 +108,11 @@ router.post('/report/generate', handle(async (req) => {
   return OpenAIService.generateReport(topic, data || {});
 }));
 
+router.post('/leave/recommendations', handle(async (req) => {
+  const { leaveHistory } = req.body;
+  return OpenAIService.generateLeaveRecommendations(leaveHistory || []);
+}));
+
 // ─────────────────────────────────────────
 // PERFORMANCE & ONBOARDING
 // ─────────────────────────────────────────
@@ -146,6 +157,12 @@ router.post('/analytics/execute', handle(async (req) => {
 router.post('/payroll/insights', handle(async (req) => {
   const { employeeId, payslipData } = req.body;
   return OpenAIService.generatePayrollInsights(employeeId, payslipData || {});
+}));
+
+// Called by: aiController.aiAttendanceInsights
+router.post('/attendance/insights', handle(async (req) => {
+  const { attendance } = req.body;
+  return OpenAIService.generateAttendanceInsights({ attendance });
 }));
 
 // Called by: copilotController (HR Helpdesk Chatbot / Copilot)
